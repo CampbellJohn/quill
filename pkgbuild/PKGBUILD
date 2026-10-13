@@ -1,14 +1,14 @@
 # Maintainer: David Heinemeier Hansson <david@hey.com>
 
-pkgname=omawrite
+pkgname=quill
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Dead-simple Markdown writing app built with Qt Quick'
+pkgdesc='Minimalist prose writing app with live Markdown preview (fork of Omawrite)'
 arch=('x86_64')
-url='https://github.com/omacom-io/omawrite'
+url='https://github.com/omacom-io/quill'
 license=('MIT')
-install='omawrite.install'
-depends=('qt6-base' 'qt6-declarative' 'xdg-desktop-portal')
+install='quill.install'
+depends=('qt6-base' 'qt6-declarative' 'xdg-desktop-portal' 'python' 'pandoc-cli' 'typst')
 makedepends=('gcc' 'make' 'qt6-base' 'qt6-declarative')
 source=()
 sha256sums=()
@@ -20,9 +20,13 @@ build() {
 
 package() {
   cd "$startdir/.."
-  /usr/bin/install -Dm755 build/omawrite "$pkgdir/usr/bin/omawrite"
+  /usr/bin/install -Dm755 build/quill "$pkgdir/usr/bin/quill"
   /usr/bin/install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   /usr/bin/install -Dm644 fonts/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/OFL.txt"
-  /usr/bin/install -Dm644 "$startdir/omawrite.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/omawrite.svg"
-  /usr/bin/install -Dm644 "$startdir/omawrite.desktop" "$pkgdir/usr/share/applications/omawrite.desktop"
+  /usr/bin/install -Dm644 "$startdir/quill.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/quill.svg"
+  for file in quill.lua import.lua manuscript.typ book.typ; do
+    /usr/bin/install -Dm644 "export/$file" "$pkgdir/usr/share/quill/$file"
+  done
+  /usr/bin/install -Dm755 export/quill-export "$pkgdir/usr/share/quill/quill-export"
+  /usr/bin/install -Dm644 "$startdir/quill.desktop" "$pkgdir/usr/share/applications/quill.desktop"
 }

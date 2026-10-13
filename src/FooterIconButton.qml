@@ -60,6 +60,38 @@ Item {
                 context.lineTo(13, 13.5);
                 context.moveTo(5, 9.5);
                 context.lineTo(11, 9.5);
+            } else if (control.iconName === "library") {
+                // A short stack of pages.
+                context.moveTo(2.5, 3.5);
+                context.lineTo(13.5, 3.5);
+                context.moveTo(2.5, 6.5);
+                context.lineTo(13.5, 6.5);
+                context.moveTo(2.5, 9.5);
+                context.lineTo(13.5, 9.5);
+                context.moveTo(2.5, 12.5);
+                context.lineTo(9.5, 12.5);
+            } else if (control.iconName === "export") {
+                context.moveTo(8, 10);
+                context.lineTo(8, 2.5);
+                context.moveTo(5, 5.5);
+                context.lineTo(8, 2.5);
+                context.lineTo(11, 5.5);
+                context.moveTo(5.5, 7.5);
+                context.lineTo(2.5, 7.5);
+                context.lineTo(2.5, 13.5);
+                context.lineTo(13.5, 13.5);
+                context.lineTo(13.5, 7.5);
+                context.lineTo(10.5, 7.5);
+            } else if (control.iconName === "aids") {
+                // Two sliders.
+                context.moveTo(2.5, 5);
+                context.lineTo(13.5, 5);
+                context.moveTo(2.5, 11);
+                context.lineTo(13.5, 11);
+                context.moveTo(6, 3);
+                context.lineTo(6, 7);
+                context.moveTo(10.5, 9);
+                context.lineTo(10.5, 13);
             } else {
                 context.moveTo(2.5, 13);
                 context.lineTo(2.5, 3.5);

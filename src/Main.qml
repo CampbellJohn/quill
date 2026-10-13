@@ -13,7 +13,7 @@ ApplicationWindow {
     minimumWidth: 720
     minimumHeight: 520
     visible: true
-    title: (backend.modified ? "* " : "") + backend.fileName + " - Omawrite"
+    title: (backend.modified ? "* " : "") + backend.fileName + " - Quill"
 
     readonly property bool darkMode: backend.darkMode
     readonly property color pageColor: backend.themeBackground
@@ -39,13 +39,18 @@ ApplicationWindow {
     property string pendingAction: ""
     property bool replaceOpen: false
     property bool awaitingPendingSave: false
+    property bool libraryOpen: false
+    property bool typingRecently: false
+    property string pendingExportFormat: ""
+    property string pendingExportStyle: ""
+    property string pendingExportTitle: ""
 
     Material.theme: darkMode ? Material.Dark : Material.Light
     Material.accent: backend.themeAccent
     color: pageColor
 
     onClosing: function(close) {
-        if (closeConfirmed || !backend.modified)
+        if (closeConfirmed || !backend.modified || backend.saveIfAutosaving())
             return;
 
         close.accepted = false;
@@ -55,13 +60,30 @@ ApplicationWindow {
     }
 
     function requestOpen(url) {
-        if (!backend.modified) {
+        if (!backend.modified || backend.saveIfAutosaving()) {
             backend.open(url);
+            editor.forceActiveFocus();
             return;
         }
         pendingOpenUrl = url;
         pendingAction = "open";
         unsavedChangesDialog.open();
+    }
+
+    function requestNew() {
+        if (!backend.modified || backend.saveIfAutosaving()) {
+            backend.newDocument();
+            editor.forceActiveFocus();
+            return;
+        }
+        pendingAction = "new";
+        unsavedChangesDialog.open();
+    }
+
+    function toggleLibrary() {
+        libraryOpen = !libraryOpen;
+        if (!libraryOpen)
+            editor.forceActiveFocus();
     }
 
     function completePendingAction() {
@@ -72,7 +94,10 @@ ApplicationWindow {
             close();
         } else if (action === "open") {
             backend.open(pendingOpenUrl);
+        } else if (action === "new") {
+            backend.newDocument();
         }
+        editor.forceActiveFocus();
     }
 
     FontMetrics {
@@ -168,9 +193,39 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "Ctrl+D"
+        context: Qt.WindowShortcut
+        onActivated: editor.wrapSelection("~~", "~~")
+    }
+
+    Shortcut {
         sequence: "Ctrl+K"
         context: Qt.WindowShortcut
         onActivated: editor.insertLink()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+L"
+        context: Qt.ApplicationShortcut
+        onActivated: win.toggleLibrary()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+E"
+        context: Qt.ApplicationShortcut
+        onActivated: exportDialog.open()
+    }
+
+    Shortcut {
+        sequence: "Ctrl+Shift+N"
+        context: Qt.ApplicationShortcut
+        onActivated: win.requestNew()
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+Return", "Ctrl+Enter"]
+        context: Qt.WindowShortcut
+        onActivated: editor.insertPageBreak()
     }
 
     Shortcut {
@@ -272,8 +327,44 @@ ApplicationWindow {
         id: openFileDialog
         title: "Open File"
         fileMode: Dialogs.FileDialog.OpenFile
-        nameFilters: ["Markdown files (*.md *.markdown)", "All files (*)"]
+        currentFolder: "file://" + backend.libraryPath
+        nameFilters: ["Stories (*.md *.markdown *.txt *.docx *.odt *.rtf)",
+                      "Markdown files (*.md *.markdown)", "Text files (*.txt)",
+                      "Word documents (*.docx)", "All files (*)"]
         onAccepted: win.requestOpen(selectedFile)
+    }
+
+    Dialogs.FileDialog {
+        id: exportFileDialog
+        title: "Export"
+        fileMode: Dialogs.FileDialog.SaveFile
+        onAccepted: backend.exportDocument(selectedFile, win.pendingExportFormat,
+                                           win.pendingExportStyle, win.pendingExportTitle)
+    }
+
+    ExportDialog {
+        id: exportDialog
+        darkMode: win.darkMode
+        textScale: win.textScale
+        textColor: win.textColor
+        strongTextColor: win.strongTextColor
+        mutedColor: win.mutedColor
+        activeButtonColor: backend.themeAccent
+        containerWidth: win.width
+        containerHeight: win.height
+        onClosed: editor.forceActiveFocus()
+
+        onExportRequested: function(format, style, title, extension) {
+            win.pendingExportFormat = format;
+            win.pendingExportStyle = style;
+            win.pendingExportTitle = title;
+            var labels = {md: "Markdown (*.md)", txt: "Plain text (*.txt)",
+                          pdf: "PDF (*.pdf)", docx: "Word document (*.docx)"};
+            exportFileDialog.nameFilters = [labels[format]];
+            exportFileDialog.defaultSuffix = extension;
+            exportFileDialog.selectedFile = backend.suggestedExportUrl(extension);
+            exportFileDialog.open();
+        }
     }
 
     Dialogs.FileDialog {
@@ -332,7 +423,7 @@ ApplicationWindow {
         standardButtons: Dialog.Close
         anchors.centerIn: parent
         contentItem: Label {
-            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
+            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open (.md, .txt, .docx)\nCtrl+L  Library\nCtrl+Shift+N  New Story\nCtrl+N  New Window\nCtrl+E  Export\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+D  Strikethrough\nCtrl+K  Link\nCtrl+Enter  Page Break\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
             lineHeight: 1.5
         }
     }
@@ -352,7 +443,8 @@ ApplicationWindow {
             anchors.bottomMargin: win.footerHeight
             clip: true
             contentWidth: width
-            contentHeight: Math.max(height, editor.y + editor.implicitHeight + 220)
+            contentHeight: Math.max(height, editor.y + editor.implicitHeight
+                                            + (backend.typewriterScrolling ? height / 2 : 220))
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -518,6 +610,18 @@ ApplicationWindow {
             // Keep the editing caret within the viewport so writing past the
             // bottom edge scrolls the page along with the text.
             function ensureCursorVisible() {
+                if (backend.typewriterScrolling && editor.activeFocus) {
+                    var center = editor.y + editor.cursorRectangle.y
+                                 + editor.cursorRectangle.height / 2;
+                    var target = clampContentY(center - height / 2);
+                    if (Math.abs(target - (wheelScroll.running ? wheelScroll.targetY : contentY)) < 1)
+                        return;
+                    if (wheelScroll.running)
+                        wheelScroll.retarget(target);
+                    else
+                        wheelScroll.begin(contentY, target, 0.14, 0);
+                    return;
+                }
                 var margin = win.editorFontPixelSize * 2;
                 var cursorTop = editor.y + editor.cursorRectangle.y;
                 var cursorBottom = cursorTop + editor.cursorRectangle.height;
@@ -532,11 +636,20 @@ ApplicationWindow {
             TextEdit {
                 id: editor
                 objectName: "sourceEditor"
-                x: Math.round((editorFlick.width - width) / 2)
+                // The library panel overlays the left edge; slide the text
+                // clear of it, narrowing it when the window is tight.
+                readonly property int reservedLeft: win.libraryOpen ? libraryPanel.width : 0
+                x: Math.max(Math.round((editorFlick.width - width) / 2), reservedLeft)
+                Behavior on x {
+                    NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                }
                 // The resting position counts from the window's top edge, so
-                // take back the top inset the Flickable already adds.
-                y: Math.max(0, Math.max(42, Math.round(win.height * 0.05)) - win.footerHeight)
-                width: win.editorWidth
+                // take back the top inset the Flickable already adds. With
+                // typewriter scrolling the first line starts mid-screen.
+                y: backend.typewriterScrolling
+                   ? Math.round(editorFlick.height / 2 - win.editorFontPixelSize)
+                   : Math.max(0, Math.max(42, Math.round(win.height * 0.05)) - win.footerHeight)
+                width: Math.min(win.editorWidth, editorFlick.width - reservedLeft - 24)
                 height: Math.max(editorFlick.height - y - 96, implicitHeight + 20)
                 text: ""
                 textFormat: TextEdit.PlainText
@@ -561,6 +674,7 @@ ApplicationWindow {
                     color: win.strongTextColor
                 }
                 onCursorRectangleChanged: editorFlick.ensureCursorVisible()
+                onCursorPositionChanged: backend.setCursorPosition(cursorPosition)
                 onFontChanged: backend.documentFontChanged()
 
                 function replaceSelectionWith(replacement) {
@@ -671,42 +785,63 @@ ApplicationWindow {
                         replaceSelectionWith(pastedText);
                 }
 
-                function skipHiddenForward(position) {
-                    var pos = position;
-                    var ranges = backend.hiddenRangesAt(pos);
-                    for (var i = 0; i < ranges.length; i++) {
-                        if (pos >= ranges[i].start && pos < ranges[i].end) {
-                            pos = ranges[i].end;
-                            i = -1;
-                        }
-                    }
-                    return pos;
+                function insertPageBreak() {
+                    forceActiveFocus();
+                    var start = Math.min(selectionStart, selectionEnd);
+                    var before = text.slice(0, start);
+                    var prefix = before.length === 0 || /\n\n$/.test(before) ? ""
+                               : /\n$/.test(before) ? "\n" : "\n\n";
+                    replaceSelectionWith(prefix + "\\pagebreak\n\n");
                 }
 
-                function skipHiddenBackward(position) {
-                    var pos = position;
-                    var ranges = backend.hiddenRangesAt(pos);
-                    for (var i = ranges.length - 1; i >= 0; i--) {
-                        if (pos > ranges[i].start && pos <= ranges[i].end) {
-                            pos = ranges[i].start;
-                            i = ranges.length;
-                        }
-                    }
-                    return pos;
+                function insideCode(position) {
+                    var lineStart = text.lastIndexOf("\n", position - 1) + 1;
+                    var line = text.slice(lineStart, position);
+                    if (((line.match(/`/g) || []).length % 2) === 1)
+                        return true;
+                    var fences = (text.slice(0, position).match(/^\s{0,3}(```|~~~)/gm) || []).length;
+                    return (fences % 2) === 1;
                 }
 
-                function moveCursorVisibly(direction) {
-                    if (selectionStart !== selectionEnd) {
-                        cursorPosition = direction > 0
-                            ? Math.max(selectionStart, selectionEnd)
-                            : Math.min(selectionStart, selectionEnd);
-                        return;
-                    }
+                // Curly quotes, em dashes and ellipses as you type. Undo
+                // (Ctrl+Z) removes the typed character along with its
+                // replacement.
+                function applySmartTypography(character) {
+                    if (character !== '"' && character !== "'" && character !== "-"
+                            && character !== ".")
+                        return false;
+                    var start = Math.min(selectionStart, selectionEnd);
+                    var end = Math.max(selectionStart, selectionEnd);
+                    if (insideCode(start))
+                        return false;
 
-                    var pos = Math.max(0, Math.min(text.length, cursorPosition + direction));
-                    cursorPosition = direction > 0
-                        ? skipHiddenForward(pos)
-                        : skipHiddenBackward(pos);
+                    var previous = start > 0 ? text.charAt(start - 1) : "";
+                    var opening = previous === ""
+                        || /[\s(\[{\u2014\u2013\u201c\u2018]/.test(previous);
+                    if (character === '"') {
+                        replaceSelectionWith(opening ? "\u201c" : "\u201d");
+                        return true;
+                    }
+                    if (character === "'") {
+                        replaceSelectionWith(opening ? "\u2018" : "\u2019");
+                        return true;
+                    }
+                    if (start !== end)
+                        return false;
+                    if (character === "-" && previous === "-") {
+                        // Dashes opening a line stay literal, so lists and
+                        // --- scene breaks still work.
+                        var lineStart = text.lastIndexOf("\n", start - 1) + 1;
+                        if (/^\s*-$/.test(text.slice(lineStart, start)))
+                            return false;
+                        EditorMutations.replaceRange(editor, start - 1, start, "\u2014");
+                        return true;
+                    }
+                    if (character === "." && text.slice(start - 2, start) === "..") {
+                        EditorMutations.replaceRange(editor, start - 2, start, "\u2026");
+                        return true;
+                    }
+                    return false;
                 }
 
                 function movePage(direction, extendSelection) {
@@ -751,19 +886,14 @@ ApplicationWindow {
 
                     var returnKey = event.key === Qt.Key_Return || event.key === Qt.Key_Enter;
                     var commandModifier = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier);
-                    if (returnKey && !commandModifier) {
+                    if (!commandModifier && backend.smartTypography && event.text.length === 1
+                            && applySmartTypography(event.text)) {
+                        event.accepted = true;
+                    } else if (returnKey && !commandModifier) {
                         smartReturn(event.modifiers & Qt.ShiftModifier);
                         event.accepted = true;
                     } else if (!commandModifier && event.key === Qt.Key_Backspace
                                && deleteParagraphBreakBehindCursor()) {
-                        event.accepted = true;
-                    } else if (!commandModifier && !(event.modifiers & Qt.ShiftModifier)
-                               && event.key === Qt.Key_Right) {
-                        moveCursorVisibly(1);
-                        event.accepted = true;
-                    } else if (!commandModifier && !(event.modifiers & Qt.ShiftModifier)
-                               && event.key === Qt.Key_Left) {
-                        moveCursorVisibly(-1);
                         event.accepted = true;
                     } else if (!commandModifier
                                && (event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp)) {
@@ -777,6 +907,10 @@ ApplicationWindow {
                     if (win.searchUpdating)
                         return;
                     var contentChanged = backend.editorTextChanged();
+                    if (contentChanged) {
+                        win.typingRecently = true;
+                        typingFade.restart();
+                    }
                     if (win.searchOpen && contentChanged)
                         win.updateSearch();
                 }
@@ -784,7 +918,7 @@ ApplicationWindow {
                 Text {
                     anchors.left: parent.left
                     anchors.top: parent.top
-                    text: "# Start writing"
+                    text: "# Title\n\nOnce upon a time…"
                     visible: editor.text.length === 0 && !editor.activeFocus
                     color: win.mutedColor
                     font.family: editor.font.family
@@ -799,6 +933,50 @@ ApplicationWindow {
             }
         }
 
+        Timer {
+            id: typingFade
+            interval: 1600
+            onTriggered: win.typingRecently = false
+        }
+
+        // Session goal progress: a hairline across the top of the window.
+        Rectangle {
+            objectName: "sessionGoalBar"
+            anchors.top: parent.top
+            anchors.left: parent.left
+            height: 2
+            width: parent.width * Math.min(1, backend.sessionWords / Math.max(1, backend.sessionGoal))
+            visible: backend.showSessionGoal
+            color: backend.themeAccent
+            opacity: backend.sessionWords >= backend.sessionGoal ? 1 : 0.7
+            z: 20
+            Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+        }
+
+        LibraryPanel {
+            id: libraryPanel
+            objectName: "libraryPanel"
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: Math.min(win.scaledSize(300), Math.round(win.width * 0.4))
+            z: 15
+            open: win.libraryOpen
+            darkMode: win.darkMode
+            textScale: win.textScale
+            textColor: win.textColor
+            mutedColor: win.mutedColor
+            highlightColor: backend.themeAccent
+            onFileChosen: function(url) {
+                win.libraryOpen = false;
+                win.requestOpen(url);
+            }
+            onNewRequested: {
+                win.libraryOpen = false;
+                win.requestNew();
+            }
+            onDismissed: win.toggleLibrary()
+        }
+
         Row {
             id: footerStatus
             anchors.left: parent.left
@@ -806,7 +984,17 @@ ApplicationWindow {
             anchors.leftMargin: 12
             anchors.bottomMargin: 10
             spacing: 12
-            opacity: 0.55
+            z: 16
+            opacity: win.typingRecently ? 0.12 : 0.55
+            Behavior on opacity { NumberAnimation { duration: 400 } }
+
+            FooterIconButton {
+                objectName: "libraryButton"
+                iconName: "library"
+                iconColor: win.mutedColor
+                tooltip: "Library (Ctrl+L)"
+                onClicked: win.toggleLibrary()
+            }
 
             FooterIconButton {
                 objectName: "saveButton"
@@ -822,6 +1010,23 @@ ApplicationWindow {
                 iconColor: win.mutedColor
                 tooltip: "Open"
                 onClicked: backend.openDialog()
+            }
+
+            FooterIconButton {
+                objectName: "exportButton"
+                iconName: "export"
+                iconColor: win.mutedColor
+                tooltip: "Export (Ctrl+E)"
+                onClicked: exportDialog.open()
+            }
+
+            FooterIconButton {
+                id: aidsButton
+                objectName: "aidsButton"
+                iconName: "aids"
+                iconColor: win.mutedColor
+                tooltip: "Writing aids"
+                onClicked: aidsPopup.opened ? aidsPopup.close() : aidsPopup.open()
             }
 
             FooterIconButton {
@@ -865,16 +1070,47 @@ ApplicationWindow {
             onClosed: editor.forceActiveFocus()
         }
 
-        Label {
+        WritingAidsPopup {
+            id: aidsPopup
+            objectName: "aidsPopup"
+            x: footerStatus.x + aidsButton.x - 8
+            y: footerStatus.y - height - 10
+            width: win.scaledSize(340)
+            darkMode: win.darkMode
+            textScale: win.textScale
+            textColor: win.textColor
+            mutedColor: win.mutedColor
+            onClosed: editor.forceActiveFocus()
+        }
+
+        Row {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.rightMargin: 12
             anchors.bottomMargin: 10
-            text: backend.wordCount + (backend.wordCount === 1 ? " Word" : " Words")
-            color: win.mutedColor
-            opacity: 0.75
-            font.family: "IBM Plex Mono"
-            font.pixelSize: win.scaledSize(11)
+            spacing: 14
+            opacity: win.typingRecently ? 0.15 : 0.75
+            Behavior on opacity { NumberAnimation { duration: 400 } }
+
+            Label {
+                objectName: "sessionGoalLabel"
+                visible: backend.showSessionGoal
+                text: backend.sessionWords >= backend.sessionGoal
+                      ? "Goal met · " + backend.sessionWords
+                      : backend.sessionWords + " / " + backend.sessionGoal
+                color: backend.sessionWords >= backend.sessionGoal ? backend.themeAccent : win.mutedColor
+                font.family: "IBM Plex Mono"
+                font.pixelSize: win.scaledSize(11)
+            }
+
+            Label {
+                objectName: "wordCountLabel"
+                visible: backend.showWordCount
+                text: backend.wordCount + (backend.wordCount === 1 ? " Word" : " Words")
+                color: win.mutedColor
+                font.family: "IBM Plex Mono"
+                font.pixelSize: win.scaledSize(11)
+            }
         }
 
 

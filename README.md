@@ -1,43 +1,79 @@
-# Omawrite
+# Quill
 
-A dead-simple Markdown writing app built with Qt Quick and C++ that automatically follows system dark/light mode.
+A minimalist writing app for short stories and other prose. It's a fork of
+[Omawrite](https://github.com/omacom-io/omawrite), so it has Omawrite's look and shortcuts, follows the
+Omarchy theme, and recovers unsaved work after a crash. Quill adds a live Markdown preview, so you
+write Markdown without having to look at the symbols.
 
-<img width="2948" height="3227" alt="screenshot-2026-06-23_15-24-08" src="https://github.com/user-attachments/assets/4e930c0d-edda-4046-b444-a59eff523329" />
-<img width="2948" height="3227" alt="screenshot-2026-06-23_15-23-23" src="https://github.com/user-attachments/assets/8ced7c26-961b-4ded-b263-84403001a951" />
+## Writing
 
+Markdown symbols stay visible only on the line your cursor is on. Every other line shows the
+finished result: headings at larger sizes, *italic*, **bold**, ***both***, ~~strikethrough~~,
+blockquotes, lists, links, `code` and footnotes. Quill also understands a few conventions for prose:
 
-## Install
+| Type                  | You get                                          |
+|-----------------------|--------------------------------------------------|
+| `***`, `---`, `* * *` | Scene break (`#` in manuscripts, `⁂` in books)   |
+| `->THE END<-`         | A centered line                                  |
+| `\pagebreak`          | Page break in PDF and Word (`Ctrl+Enter`)        |
+| `Text.[^1]` / `[^1]: Note` | Footnote                                    |
 
-Install via the Omarchy Package Repository via the `omawrite` package. It's installed by default in new installations of Omarchy (from Quattro forward).
+Smart typography turns `"` and `'` into curly quotes, `--` into an em dash and `...` into an
+ellipsis as you type. A dash at the start of a line is left alone, so lists and `---` still work.
+
+Writing aids each have an on/off switch in the footer's sliders popup:
+- smart typography
+- typewriter scrolling
+- word count
+- session word goal (a hairline progress bar across the top of the window)
+- autosave
+
+The footer fades while you type.
+
+## Files
+
+- `Ctrl+L` opens the library: the stories in `~/Documents/Writing`, newest first, with a filter box and a **New** button.
+- `Ctrl+O` opens `.md`, `.txt`, `.docx`, `.odt` or `.rtf` files from anywhere.
+- A Word, ODT or RTF file is converted to Markdown when it's opened. Saving it writes a new `.md` beside the original, which is never changed.
+- Stories that have a file autosave as you type.
+
+## Export (`Ctrl+E`)
+
+- **Markdown:** a copy of the source.
+- **Plain text:** formatting removed, one line per paragraph, footnotes as `[1]`.
+- **PDF / Word, Manuscript style:** standard submission format.
+  - Times 12pt, double-spaced, 1" margins.
+  - Page one has your name and contact details plus "about N words".
+  - The title and byline sit partway down page one.
+  - Later pages carry a `Surname / Title / page` header.
+- **PDF / Word, Book style:**
+  - A 6×9 serif page, justified, with a title page.
+  - Paragraphs are indented, except after headings and breaks.
+  - Chapters start on a new page.
+  - Scene breaks get an ornament, and page numbers are centered.
+
+If the first line is `# Title`, it becomes the title. Otherwise the file name is used. The top
+heading level left in the story is treated as chapter level.
 
 ## Shortcuts
 
-- `Ctrl+S` saves. Unsaved documents use the XDG desktop portal file picker.
-- `Ctrl+Shift+S` saves as.
-- `Ctrl+O` opens a Markdown file through the portal picker.
-- `Ctrl+P` opens the system print dialog.
-- `Ctrl+N` opens a new Omawrite window.
-- `Ctrl+Z`, `Ctrl+Shift+Z`, and `Ctrl+Y` handle undo and redo.
-- `Super+F` toggles fullscreen. Qt maps this key as `Meta+F`.
-- `Ctrl+F` searches the document. Use `Enter` or `Ctrl+G` for the next match and `Shift+Enter` for the previous match.
-- `Ctrl+H` opens find and replace.
-- `Ctrl+B`, `Ctrl+I`, and `Ctrl+K` insert bold, italic, and link Markdown.
-- `Ctrl+?` shows the keyboard shortcut reference.
+`Ctrl+S` save · `Ctrl+Shift+S` save as · `Ctrl+O` open · `Ctrl+L` library · `Ctrl+Shift+N` new story ·
+`Ctrl+N` new window · `Ctrl+E` export · `Ctrl+F` / `Ctrl+H` find / replace · `Ctrl+B` bold ·
+`Ctrl+I` italic · `Ctrl+D` strikethrough · `Ctrl+K` link · `Ctrl+Enter` page break · `Ctrl+P` print ·
+`F11` / `Super+F` fullscreen · `Ctrl+?` all shortcuts
 
-Unsaved drafts are recovered after an abnormal exit. Omawrite also watches open files
-and warns before an external change can replace local work.
+## Build and install
 
-The font button in the footer picks the writing font from any installed text font,
-and Omawrite remembers the choice. IBM Plex Mono is the default.
+Requirements: Qt 6 (`qt6-base`, `qt6-declarative`), `xdg-desktop-portal`, plus `python`,
+`pandoc-cli` and `typst` for import and export.
 
-Text follows the desktop text size — `omarchy display text size`, or GNOME's
-`text-scaling-factor` — and re-flows without a restart. The default of 12px leaves
-Omawrite at the size it is designed around; larger and smaller sizes scale from there.
+```sh
+bin/build           # build/quill
+bin/test            # test suite (QUILL_SCREENSHOT_DIR=… QUILL_SAMPLE=story.md to capture screenshots)
+bin/install-local   # install to ~/.local: binary, export helper, launcher entry, icon
+```
 
-## Requirements
+The export helper (`export/quill-export`, with the `quill.lua` filter and the
+`manuscript.typ`/`book.typ` templates) is installed to `~/.local/share/quill/`.
 
-- Qt 6: `qt6-base`, `qt6-declarative`, `qt6-quickcontrols2`
-- `xdg-desktop-portal` and a portal backend
-
-The IBM Plex Mono font is bundled under the SIL Open Font License 1.1; see
-`fonts/OFL.txt`. The font is copyright IBM Corp.
+IBM Plex Mono is bundled under the SIL Open Font License 1.1; see `fonts/OFL.txt`.

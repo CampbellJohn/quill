@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""Quill's bridge to pandoc and typst.
+
+  quill-export import FILE.docx            Markdown on stdout
+  quill-export export --format pdf|docx|txt|md --style manuscript|book
+                      --title T --author A --contact C --input IN.md --output OUT
+
+Errors go to stderr; Quill shows the last line in its status bar.
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+# Pandoc's Markdown, minus extensions that misfire on prose: "$5 and $6" is
+# not math, "~5 miles" is not a subscript, "@name" is not a citation. Every
+# newline is a line break, matching what the editor shows.
+READ_MARKDOWN = ("markdown+hard_line_breaks-tex_math_dollars-subscript-superscript"
+                 "-citations-definition_lists-example_lists-implicit_figures")
+
+# Clean Markdown for the editor: no attribute or span syntax, curly quotes
+# kept as typed, one line per paragraph.
+WRITE_MARKDOWN = ("markdown+hard_line_breaks-smart-raw_html-native_divs-native_spans"
+                  "-bracketed_spans-fenced_divs-link_attributes-header_attributes"
+                  "-escaped_line_breaks-simple_tables-multiline_tables-grid_tables")
+
+
+def die(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def need(tool, package):
+    if not shutil.which(tool):
+        die(f"{tool} is not installed (sudo pacman -S {package})")
+
+
+def run(args, **kwargs):
+    result = subprocess.run(args, capture_output=True, text=True, **kwargs)
+    if result.returncode != 0:
+        lines = [line for line in result.stderr.strip().splitlines() if line.strip()]
+        die(lines[-1] if lines else f"{os.path.basename(args[0])} failed")
+    return result
+
+
+# --- import -----------------------------------------------------------------
+
+def import_document(path):
+    need("pandoc", "pandoc-cli")
+    result = run(["pandoc", path, "-t", WRITE_MARKDOWN, "--wrap=none",
+                  "--lua-filter", os.path.join(HERE, "import.lua")])
+    sys.stdout.write(result.stdout)
+
+
+# --- export -----------------------------------------------------------------
+
+def count_words(text):
+    return len(re.findall(r"[\w]+(?:['’-][\w]+)*", text))
+
+
+def rounded_words(count):
+    # Manuscript convention: an approximate count, to the nearest hundred.
+    if count < 100:
+        return f"{count:,}"
+    return f"{int(round(count / 100.0)) * 100:,}"
+
+
+def strip_title(text, title):
+    """Drop a leading `# Title` line when it is the story's title, so it is
+    not printed twice under the generated title block."""
+    lines = text.lstrip("\n").split("\n")
+    if lines and re.match(r"^#\s+", lines[0]):
+        heading = re.sub(r"[*_~`]", "", re.sub(r"^#\s+|\s*#*\s*$", "", lines[0])).strip()
+        if heading == title.strip():
+            return "\n".join(lines[1:])
+    return text
+
+
+def body_words(text):
+    # Count prose only: no Markdown markers, footnote labels or page breaks.
+    text = re.sub(r"^\\(pagebreak|newpage)\s*$", "", text, flags=re.M)
+    text = re.sub(r"\[\^[^\]]+\]:?", "", text)
+    text = re.sub(r"^\s*(->|#+\s)|<-\s*$", "", text, flags=re.M)
+    return count_words(text)
+
+
+def pandoc_env(args, words):
+    env = dict(os.environ)
+    env.update({
+        "QUILL_STYLE": args.style,
+        "QUILL_TITLE": args.title,
+        "QUILL_AUTHOR": args.author.strip(),
+        "QUILL_CONTACT": args.contact.strip(),
+        "QUILL_WORDS": words,
+    })
+    return env
+
+
+def export_document(args):
+    with open(args.input, encoding="utf-8") as handle:
+        source = handle.read()
+
+    if args.format == "md":
+        write_atomically(args.output, source.encode("utf-8"))
+        return
+
+    need("pandoc", "pandoc-cli")
+    body = strip_title(source, args.title) if args.title else source
+    words = rounded_words(body_words(body))
+    env = pandoc_env(args, words)
+    lua = os.path.join(HERE, "quill.lua")
+
+    with tempfile.TemporaryDirectory(prefix="quill-") as work:
+        body_path = os.path.join(work, "body.md")
+        with open(body_path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        common = ["pandoc", body_path, "-f", READ_MARKDOWN, "--lua-filter", lua]
+
+        if args.format == "txt":
+            output = os.path.join(work, "out.txt")
+            run(common + ["-t", "plain-smart", "--wrap=none", "-o", output], env=env)
+        elif args.format == "docx":
+            reference = os.path.join(work, "reference.docx")
+            build_reference_docx(reference, args, work)
+            output = os.path.join(work, "out.docx")
+            run(common + ["-t", "docx", "--reference-doc", reference, "-o", output], env=env)
+        elif args.format == "pdf":
+            need("typst", "typst")
+            template = os.path.join(HERE, f"{args.style}.typ")
+            typ = os.path.join(work, "out.typ")
+            output = os.path.join(work, "out.pdf")
+            run(common + ["-t", "typst", "--template", template, "--wrap=preserve",
+                          "-V", f"quill-header={typst_header(args)}", "-o", typ], env=env)
+            run(["typst", "compile", typ, output])
+        else:
+            die(f"Unknown format {args.format}")
+
+        with open(output, "rb") as handle:
+            write_atomically(args.output, handle.read())
+
+
+def write_atomically(path, data):
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".quill-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+
+def surname(author):
+    parts = author.strip().split()
+    return parts[-1] if parts else ""
+
+
+def running_header(args):
+    """Manuscript running head: Surname / Title / page."""
+    pieces = [p for p in (surname(args.author), args.title.strip()) if p]
+    return " / ".join(pieces)
+
+
+def typst_header(args):
+    text = running_header(args) if args.style == "manuscript" else args.title.strip()
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# --- Word reference document ------------------------------------------------
+
+def xml_escape(text):
+    return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def style_xml(style_id, name, ppr="", rpr="", based_on="Normal", next_style=None,
+              kind="paragraph"):
+    parts = [f'<w:style w:type="{kind}" w:customStyle="1" w:styleId="{style_id}">',
+             f'<w:name w:val="{name}"/>']
+    if based_on:
+        parts.append(f'<w:basedOn w:val="{based_on}"/>')
+    if next_style:
+        parts.append(f'<w:next w:val="{next_style}"/>')
+    parts.append('<w:qFormat/>')
+    if ppr:
+        parts.append(f'<w:pPr>{ppr}</w:pPr>')
+    if rpr:
+        parts.append(f'<w:rPr>{rpr}</w:rPr>')
+    parts.append('</w:style>')
+    return "".join(parts)
+
+
+def fonts(name):
+    return f'<w:rFonts w:ascii="{name}" w:hAnsi="{name}" w:eastAsia="{name}" w:cs="{name}"/>'
+
+
+def size(points):
+    half = int(points * 2)
+    return f'<w:sz w:val="{half}"/><w:szCs w:val="{half}"/>'
+
+
+def spacing(line=None, before=0, after=0):
+    # Word measures in twentieths of a point; 240 = single, 480 = double.
+    attrs = f'w:before="{before}" w:after="{after}"'
+    if line:
+        attrs += f' w:line="{line}" w:lineRule="auto"'
+    return f'<w:spacing {attrs}/>'
+
+
+def styles_for(style):
+    """(style id -> definition) for every style Quill's Word output uses."""
+    if style == "manuscript":
+        font, points, line, indent = "Times New Roman", 12, 480, 720
+        body = spacing(line) + f'<w:ind w:firstLine="{indent}"/>'
+        heading_ppr = spacing(line) + '<w:jc w:val="center"/><w:keepNext/>'
+        heading_rpr = fonts(font) + size(points) + '<w:b w:val="0"/><w:color w:val="000000"/>'
+        h1_ppr = heading_ppr
+        title_ppr = spacing(line, before=3600) + '<w:jc w:val="center"/>'
+        title_rpr = size(points)
+        byline_ppr = spacing(line, after=480) + '<w:jc w:val="center"/>'
+        justify = ""
+    else:
+        font, points, line, indent = "Garamond", 12, 300, 360
+        justify = '<w:jc w:val="both"/>'
+        body = spacing(line) + f'<w:ind w:firstLine="{indent}"/>' + justify
+        heading_ppr = spacing(line, before=480, after=240) + '<w:jc w:val="center"/><w:keepNext/>'
+        heading_rpr = fonts(font) + size(14) + '<w:b w:val="0"/><w:color w:val="000000"/>'
+        h1_ppr = ('<w:pageBreakBefore/>' + spacing(line, before=2400, after=720)
+                  + '<w:jc w:val="center"/><w:keepNext/>')
+        title_ppr = '<w:pageBreakBefore w:val="0"/>' + spacing(line, before=4320, after=360) + '<w:jc w:val="center"/>'
+        title_rpr = size(26)
+        byline_ppr = spacing(line) + '<w:jc w:val="center"/>'
+
+    no_indent = (body if style == "manuscript"
+                 else spacing(line) + '<w:ind w:firstLine="0"/>' + justify)
+    centered = spacing(line) + '<w:ind w:firstLine="0"/><w:jc w:val="center"/>'
+    return {
+        "Normal": style_xml("Normal", "Normal", spacing(line), fonts(font) + size(points)
+                            + '<w:color w:val="000000"/>', based_on=None),
+        "BodyText": style_xml("BodyText", "Body Text", body),
+        "FirstParagraph": style_xml("FirstParagraph", "First Paragraph", no_indent,
+                                    based_on="BodyText", next_style="BodyText"),
+        "Compact": style_xml("Compact", "Compact", body, based_on="BodyText"),
+        "BlockText": style_xml("BlockText", "Block Text",
+                               spacing(line) + '<w:ind w:left="720" w:right="720" w:firstLine="0"/>'
+                               '<w:jc w:val="left"/>', based_on="BodyText"),
+        "FootnoteText": style_xml("FootnoteText", "Footnote Text",
+                                  spacing(240 if style == "manuscript" else 240) + '<w:ind w:firstLine="0"/>',
+                                  size(10 if style == "book" else points), based_on="Normal"),
+        "Heading1": style_xml("Heading1", "heading 1", h1_ppr + '<w:outlineLvl w:val="0"/>',
+                              heading_rpr + ('<w:caps/>' if style == "book" else ""),
+                              next_style="FirstParagraph"),
+        "Heading2": style_xml("Heading2", "heading 2", heading_ppr + '<w:outlineLvl w:val="1"/>',
+                              heading_rpr + '<w:i/>', next_style="FirstParagraph"),
+        "Heading3": style_xml("Heading3", "heading 3", heading_ppr + '<w:outlineLvl w:val="2"/>',
+                              heading_rpr + '<w:i/>', next_style="FirstParagraph"),
+        "Centered": style_xml("Centered", "Centered", centered),
+        "SceneBreak": style_xml("SceneBreak", "Scene Break", centered + '<w:keepNext/>'),
+        "Contact": style_xml("Contact", "Contact",
+                             spacing(240) + '<w:ind w:firstLine="0"/>'
+                             '<w:tabs><w:tab w:val="right" w:pos="9360"/></w:tabs>'),
+        "StoryTitle": style_xml("StoryTitle", "Story Title", title_ppr + '<w:ind w:firstLine="0"/>',
+                                title_rpr),
+        "Byline": style_xml("Byline", "Byline", byline_ppr + '<w:ind w:firstLine="0"/>'),
+    }
+
+
+def header_xml(text, alignment, with_page):
+    page = ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>') if with_page else ""
+    prefix = f'<w:r><w:t xml:space="preserve">{xml_escape(text)}</w:t></w:r>' if text else ""
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr>{prefix}{page}</w:p></w:hdr>')
+
+
+def footer_xml(alignment):
+    return header_xml("", alignment, True).replace("w:hdr", "w:ftr")
+
+
+def build_reference_docx(path, args, work):
+    default = os.path.join(work, "default-reference.docx")
+    run(["pandoc", "-o", default, "--print-default-data-file", "reference.docx"])
+
+    with zipfile.ZipFile(default) as source:
+        files = {name: source.read(name) for name in source.namelist()}
+
+    # Styles: replace pandoc's definitions with Quill's.
+    styles = files["word/styles.xml"].decode("utf-8")
+    replacements = styles_for(args.style)
+    for style_id in replacements:
+        styles = re.sub(r'<w:style\b[^>]*w:styleId="%s"[^>]*>.*?</w:style>' % re.escape(style_id),
+                        "", styles, flags=re.S)
+    # Defaults: drop theme fonts so every run falls back to the Normal font.
+    styles = re.sub(r"<w:rPrDefault>.*?</w:rPrDefault>",
+                    "<w:rPrDefault><w:rPr>" + fonts(
+                        "Times New Roman" if args.style == "manuscript" else "Garamond")
+                    + "</w:rPr></w:rPrDefault>", styles, flags=re.S)
+    styles = styles.replace("</w:styles>", "".join(replacements.values()) + "</w:styles>")
+    files["word/styles.xml"] = styles.encode("utf-8")
+
+    # Header (manuscript: Surname / Title / page, from page two) or footer
+    # (book: centered page number).
+    rels = files["word/_rels/document.xml.rels"].decode("utf-8")
+    content_types = files["[Content_Types].xml"].decode("utf-8")
+    if args.style == "manuscript":
+        part, rel_type, ref = "header1.xml", "header", "headerReference"
+        files["word/header1.xml"] = header_xml(running_header(args) + " / ", "right", True).encode("utf-8")
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+    else:
+        part, rel_type, ref = "footer1.xml", "footer", "footerReference"
+        files["word/footer1.xml"] = footer_xml("center").encode("utf-8")
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+    rels = rels.replace("</Relationships>",
+                        f'<Relationship Id="rIdQuill1" Type="http://schemas.openxmlformats.org/'
+                        f'officeDocument/2006/relationships/{rel_type}" Target="{part}"/></Relationships>')
+    content_types = content_types.replace(
+        "</Types>", f'<Override PartName="/word/{part}" ContentType="{content_type}"/></Types>')
+    files["word/_rels/document.xml.rels"] = rels.encode("utf-8")
+    files["[Content_Types].xml"] = content_types.encode("utf-8")
+
+    # Page: US Letter, 1" margins, the header/footer above, none on page one.
+    if args.style == "manuscript":
+        page = '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+    else:
+        page = '<w:pgSz w:w="8640" w:h="12960"/><w:pgMar w:top="1080" w:right="1008" w:bottom="1080" w:left="1008" w:header="576" w:footer="576" w:gutter="0"/>'
+    section = (f'<w:sectPr><w:{ref} w:type="default" r:id="rIdQuill1"/>{page}'
+               '<w:titlePg/></w:sectPr>')
+    document = files["word/document.xml"].decode("utf-8")
+    if "xmlns:r=" not in document:
+        document = document.replace(
+            "<w:document ", '<w:document xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
+    document = re.sub(r"<w:sectPr\b.*?</w:sectPr>", section, document, flags=re.S)
+    files["word/document.xml"] = document.encode("utf-8")
+
+    # Justified lines ending in a line break (letters, verse) stay unstretched.
+    settings = files["word/settings.xml"].decode("utf-8")
+    if "doNotExpandShiftReturn" not in settings:
+        if "<w:compat>" in settings:
+            settings = settings.replace("<w:compat>", "<w:compat><w:doNotExpandShiftReturn/>", 1)
+        elif "<w:compat/>" in settings:
+            settings = settings.replace("<w:compat/>", "<w:compat><w:doNotExpandShiftReturn/></w:compat>", 1)
+        else:
+            settings = re.sub(r"(<w:settings\b[^>]*>)", r"\1<w:compat><w:doNotExpandShiftReturn/></w:compat>",
+                              settings, count=1)
+        files["word/settings.xml"] = settings.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target:
+        for name, data in files.items():
+            target.writestr(name, data)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="quill-export")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    importer = commands.add_parser("import")
+    importer.add_argument("path")
+
+    exporter = commands.add_parser("export")
+    exporter.add_argument("--format", required=True, choices=["md", "txt", "pdf", "docx"])
+    exporter.add_argument("--style", default="manuscript", choices=["manuscript", "book"])
+    exporter.add_argument("--title", default="")
+    exporter.add_argument("--author", default="")
+    exporter.add_argument("--contact", default="")
+    exporter.add_argument("--input", required=True)
+    exporter.add_argument("--output", required=True)
+
+    args = parser.parse_args()
+    if args.command == "import":
+        import_document(args.path)
+    else:
+        export_document(args)
+
+
+if __name__ == "__main__":
+    main()

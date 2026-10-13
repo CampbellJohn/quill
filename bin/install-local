@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# Builds Quill and installs it for the current user under ~/.local (no sudo).
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PREFIX="${PREFIX:-$HOME/.local}"
+
+"$ROOT/bin/build"
+
+install -Dm755 "$ROOT/build/quill" "$PREFIX/bin/quill"
+for file in quill-export quill.lua import.lua manuscript.typ book.typ; do
+  mode=644
+  [ "$file" = quill-export ] && mode=755
+  install -Dm$mode "$ROOT/export/$file" "$PREFIX/share/quill/$file"
+done
+install -Dm644 "$ROOT/pkgbuild/quill.svg" "$PREFIX/share/icons/hicolor/scalable/apps/quill.svg"
+install -Dm644 "$ROOT/pkgbuild/quill.desktop" "$PREFIX/share/applications/quill.desktop"
+update-desktop-database -q "$PREFIX/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -q -t -f "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+
+echo "Installed Quill to $PREFIX (run: quill)"

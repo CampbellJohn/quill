@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Quill
+GenericName=Prose Writer
+Comment=Minimalist writing app for stories, with live Markdown preview
+Exec=quill %f
+Icon=quill
+Terminal=false
+Categories=Office;WordProcessor;TextEditor;
+MimeType=text/markdown;text/x-markdown;text/plain;application/vnd.openxmlformats-officedocument.wordprocessingml.document;
+Keywords=markdown;write;story;fiction;prose;manuscript;
+StartupWMClass=quill

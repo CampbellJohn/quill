@@ -3,6 +3,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -37,6 +38,11 @@
 constexpr qreal typoraLineHeightPercent = 140;
 const QString lastSaveDirectorySetting = QStringLiteral("file/lastSaveDirectory");
 const QString editorFontSetting = QStringLiteral("editor/font");
+const QString libraryPathSetting = QStringLiteral("library/path");
+
+// Formats pandoc can turn into Markdown when they are opened.
+const QStringList importableSuffixes = {QStringLiteral("docx"), QStringLiteral("odt"),
+                                        QStringLiteral("rtf")};
 
 // Noto ships a separate family per script, which buries every other font in
 // the picker. Offer only the core Latin families; the rest still serve as
@@ -92,7 +98,30 @@ QString Backend::normalizedLinkUrl(const QString &clipboardText) {
 }
 
 Backend::Backend(QObject *parent) : QObject(parent) {
-    const QString savedFont = QSettings().value(editorFontSetting).toString();
+    QSettings settings;
+    m_smartTypography = settings.value(QStringLiteral("aids/smartTypography"), true).toBool();
+    m_typewriterScrolling = settings.value(QStringLiteral("aids/typewriterScrolling"), false).toBool();
+    m_showWordCount = settings.value(QStringLiteral("aids/wordCount"), true).toBool();
+    m_showSessionGoal = settings.value(QStringLiteral("aids/sessionGoal"), false).toBool();
+    m_sessionGoal = qMax(1, settings.value(QStringLiteral("aids/sessionGoalWords"), 500).toInt());
+    m_autosave = settings.value(QStringLiteral("file/autosave"), true).toBool();
+    m_authorName = settings.value(QStringLiteral("export/authorName")).toString();
+    m_authorContact = settings.value(QStringLiteral("export/authorContact")).toString();
+    m_libraryPath = settings.value(libraryPathSetting, defaultLibraryPath()).toString();
+    QDir().mkpath(m_libraryPath);
+    watchLibrary();
+    connect(&m_libraryWatcher, &QFileSystemWatcher::directoryChanged, this, [this]() {
+        emit libraryChanged();
+    });
+
+    m_autosaveTimer.setSingleShot(true);
+    m_autosaveTimer.setInterval(1500);
+    connect(&m_autosaveTimer, &QTimer::timeout, this, [this]() {
+        if (m_modified && m_fileUrl.isLocalFile())
+            saveTo(m_fileUrl);
+    });
+
+    const QString savedFont = settings.value(editorFontSetting).toString();
     m_editorFont = !savedFont.isEmpty() && QFontDatabase::hasFamily(savedFont)
         ? savedFont
         : defaultEditorFont();
@@ -208,11 +237,12 @@ void Backend::attachDocument(QObject *textDocument) {
     m_highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
 
     connect(m_document, &QTextDocument::contentsChange, this,
-            [this](int position, int, int charsAdded) {
+            [this](int position, int charsRemoved, int charsAdded) {
                 if (m_formattingTypography || m_loading)
                     return;
                 m_lastChangePos = position;
                 m_lastChangeAdded = charsAdded;
+                m_lastChangeRemoved = charsRemoved;
             });
 
     applyDocumentTypography();
@@ -230,6 +260,11 @@ void Backend::open(const QUrl &url) {
     }
 
     const QString targetName = QFileInfo(url.toLocalFile()).fileName();
+    if (importableSuffixes.contains(QFileInfo(targetName).suffix().toLower())) {
+        importDocument(url);
+        return;
+    }
+
     QFile file(url.toLocalFile());
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         setStatus(QStringLiteral("Could not open %1.").arg(targetName));
@@ -239,11 +274,13 @@ void Backend::open(const QUrl &url) {
     const QByteArray contents = file.readAll();
     loadDocumentText(QString::fromUtf8(contents));
     clearRecovery();
+    m_importedFrom.clear();
     m_lastKnownFileContents = contents;
     m_hasKnownFileContents = true;
     setFileUrl(url);
     watchCurrentFile();
     setModified(false);
+    resetSessionGoal();
     setStatus(QStringLiteral("Opened %1").arg(fileName()));
 }
 
@@ -372,47 +409,281 @@ bool Backend::editorTextChanged() {
         return false;
     m_lastDocumentText = text;
 
-    if (m_document) {
-        const int blockCount = m_document->blockCount();
-        if (blockCount > m_formattedBlockCount)
-            reapplyTypographyToChange();
-        m_formattedBlockCount = blockCount;
-    }
+    reapplyTypographyToChange();
 
     scheduleWordCount();
     setModified(true);
     setStatus(QStringLiteral("Unsaved"));
     scheduleRecovery();
+    if (m_autosave && m_fileUrl.isLocalFile())
+        m_autosaveTimer.start();
     return true;
 }
 
-QVariantList Backend::hiddenRangesAt(int position) const {
-    QVariantList ranges;
-    if (!m_document)
-        return ranges;
+bool Backend::saveIfAutosaving() {
+    if (m_modified && m_autosave && m_fileUrl.isLocalFile()) {
+        m_autosaveTimer.stop();
+        saveTo(m_fileUrl);
+    }
+    return !m_modified;
+}
 
+void Backend::setCursorPosition(int position) {
+    if (!m_document || !m_highlighter)
+        return;
     const QTextBlock block =
         m_document->findBlock(qBound(0, position, m_document->characterCount() - 1));
-    if (!block.isValid())
-        return ranges;
+    m_highlighter->setActiveBlock(block.isValid() ? block.blockNumber() : -1);
+}
 
-    const int lineStart = block.position();
-    QList<QPair<int, int>> spans;
-    const QList<MarkdownHighlighter::InlineMarkup> markup =
-        MarkdownHighlighter::inlineMarkup(block.text());
-    for (const MarkdownHighlighter::InlineMarkup &item : markup) {
-        for (const MarkdownHighlighter::Span &marker : item.markers) {
-            spans.append({lineStart + marker.start,
-                          lineStart + marker.start + marker.length});
+void Backend::newDocument() {
+    loadDocumentText(QString());
+    clearRecovery();
+    m_importedFrom.clear();
+    m_lastKnownFileContents.clear();
+    m_hasKnownFileContents = false;
+    setFileUrl(QUrl());
+    setModified(false);
+    resetSessionGoal();
+    setStatus(QStringLiteral("New story"));
+}
+
+QVariantList Backend::libraryFiles() const {
+    QVariantList files;
+    const QDir library(m_libraryPath);
+    const QFileInfoList entries = library.entryInfoList(
+        {QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt")},
+        QDir::Files | QDir::Readable, QDir::Time);
+    const QDate today = QDate::currentDate();
+    for (const QFileInfo &info : entries) {
+        QFile file(info.absoluteFilePath());
+        int words = 0;
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text))
+            words = countWords(QString::fromUtf8(file.readAll()));
+        const QDateTime modified = info.lastModified();
+        const QString when = modified.date() == today
+            ? modified.toString(QStringLiteral("h:mm ap"))
+            : modified.date().year() == today.year()
+                ? modified.toString(QStringLiteral("MMM d"))
+                : modified.toString(QStringLiteral("MMM d, yyyy"));
+        files.append(QVariantMap{
+            {QStringLiteral("name"), info.completeBaseName()},
+            {QStringLiteral("url"), QUrl::fromLocalFile(info.absoluteFilePath())},
+            {QStringLiteral("modified"), when},
+            {QStringLiteral("words"), words},
+            {QStringLiteral("current"),
+             m_fileUrl.isLocalFile() && QFileInfo(m_fileUrl.toLocalFile()) == info},
+        });
+    }
+    return files;
+}
+
+QString Backend::currentTitle() const {
+    QString fallback = QStringLiteral("Untitled");
+    if (m_fileUrl.isLocalFile())
+        fallback = QFileInfo(m_fileUrl.toLocalFile()).completeBaseName();
+    else if (m_importedFrom.isLocalFile())
+        fallback = QFileInfo(m_importedFrom.toLocalFile()).completeBaseName();
+    return documentTitle(currentDocumentText(), fallback);
+}
+
+QString Backend::documentTitle(const QString &text, const QString &fallback) {
+    static const QRegularExpression titleRe(QStringLiteral("^\\s*#\\s+(.+?)\\s*#*\\s*$"));
+    const QString firstLine = text.trimmed().section(QLatin1Char('\n'), 0, 0);
+    const QRegularExpressionMatch match = titleRe.match(firstLine);
+    if (!match.hasMatch())
+        return fallback;
+    QString title = match.captured(1);
+    static const QRegularExpression emphasisRe(QStringLiteral("[*_~`]"));
+    title.remove(emphasisRe);
+    return title.trimmed().isEmpty() ? fallback : title.trimmed();
+}
+
+QUrl Backend::suggestedExportUrl(const QString &extension) const {
+    QDir directory(m_libraryPath);
+    QString base = QStringLiteral("Untitled");
+    const QUrl source = m_fileUrl.isLocalFile() ? m_fileUrl : m_importedFrom;
+    if (source.isLocalFile()) {
+        const QFileInfo info(source.toLocalFile());
+        directory = info.absoluteDir();
+        base = info.completeBaseName();
+    } else {
+        base = QFileInfo(suggestedFileName(currentDocumentText())).completeBaseName();
+    }
+    return QUrl::fromLocalFile(directory.filePath(base + QLatin1Char('.') + extension));
+}
+
+void Backend::exportDocument(const QUrl &url, const QString &format, const QString &style,
+                             const QString &title) {
+    if (!url.isLocalFile() || m_exportProcess)
+        return;
+
+    const QString helper = helperPath();
+    if (helper.isEmpty()) {
+        setStatus(QStringLiteral("Export helper is missing; reinstall Quill."));
+        return;
+    }
+
+    const QString inputPath = QDir(QDir::tempPath()).filePath(
+        QStringLiteral("quill-export-%1.md").arg(QCoreApplication::applicationPid()));
+    QSaveFile input(inputPath);
+    if (!input.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        setStatus(QStringLiteral("Could not prepare the export."));
+        return;
+    }
+    input.write(currentDocumentText().toUtf8());
+    if (!input.commit()) {
+        setStatus(QStringLiteral("Could not prepare the export."));
+        return;
+    }
+
+    const QString outputPath = url.toLocalFile();
+    const QString outputName = QFileInfo(outputPath).fileName();
+    m_exportProcess = new QProcess(this);
+    m_exportProcess->setProgram(helper);
+    m_exportProcess->setArguments({QStringLiteral("export"),
+                                   QStringLiteral("--format"), format,
+                                   QStringLiteral("--style"), style,
+                                   QStringLiteral("--title"), title,
+                                   QStringLiteral("--author"), m_authorName,
+                                   QStringLiteral("--contact"), m_authorContact,
+                                   QStringLiteral("--input"), inputPath,
+                                   QStringLiteral("--output"), outputPath});
+    connect(m_exportProcess, &QProcess::finished, this,
+            [this, inputPath, outputName](int exitCode, QProcess::ExitStatus exitStatus) {
+                const QString error = QString::fromUtf8(m_exportProcess->readAllStandardError())
+                                          .trimmed().section(QLatin1Char('\n'), -1);
+                m_exportProcess->deleteLater();
+                m_exportProcess = nullptr;
+                QFile::remove(inputPath);
+                emit exportingChanged();
+                if (exitStatus == QProcess::NormalExit && exitCode == 0)
+                    setStatus(QStringLiteral("Exported %1").arg(outputName));
+                else
+                    setStatus(error.isEmpty() ? QStringLiteral("Export failed.")
+                                              : QStringLiteral("Export failed: %1").arg(error));
+            });
+    connect(m_exportProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart && m_exportProcess) {
+            m_exportProcess->deleteLater();
+            m_exportProcess = nullptr;
+            emit exportingChanged();
+            setStatus(QStringLiteral("Could not run the export helper."));
         }
-    }
-    std::sort(spans.begin(), spans.end());
+    });
+    setStatus(QStringLiteral("Exporting %1…").arg(outputName));
+    m_exportProcess->start();
+    emit exportingChanged();
+}
 
-    for (const auto &span : spans) {
-        ranges.append(QVariantMap{{QStringLiteral("start"), span.first},
-                                  {QStringLiteral("end"), span.second}});
+void Backend::resetSessionGoal() {
+    m_sessionStartWords = m_wordCount;
+    emit wordCountChanged();
+}
+
+void Backend::importDocument(const QUrl &url) {
+    const QString sourceName = QFileInfo(url.toLocalFile()).fileName();
+    const QString helper = helperPath();
+    if (helper.isEmpty()) {
+        setStatus(QStringLiteral("Import helper is missing; reinstall Quill."));
+        return;
     }
-    return ranges;
+
+    QProcess process;
+    process.start(helper, {QStringLiteral("import"), url.toLocalFile()});
+    if (!process.waitForFinished(60000) || process.exitStatus() != QProcess::NormalExit
+            || process.exitCode() != 0) {
+        const QString error = QString::fromUtf8(process.readAllStandardError())
+                                  .trimmed().section(QLatin1Char('\n'), -1);
+        setStatus(error.isEmpty() ? QStringLiteral("Could not import %1.").arg(sourceName)
+                                  : error);
+        return;
+    }
+
+    loadDocumentText(QString::fromUtf8(process.readAllStandardOutput()));
+    clearRecovery();
+    m_lastKnownFileContents.clear();
+    m_hasKnownFileContents = false;
+    m_importedFrom = url;
+    setFileUrl(QUrl());
+    setModified(true);
+    resetSessionGoal();
+    scheduleRecovery();
+    setStatus(QStringLiteral("Imported %1 · save to keep it as Markdown").arg(sourceName));
+}
+
+QString Backend::helperPath() const {
+    const QString bundled = QDir(QCoreApplication::applicationDirPath())
+                                .filePath(QStringLiteral("../export/quill-export"));
+    if (QFileInfo(bundled).isExecutable())
+        return QFileInfo(bundled).canonicalFilePath();
+    return QStandardPaths::locate(QStandardPaths::GenericDataLocation,
+                                  QStringLiteral("quill/quill-export"));
+}
+
+QString Backend::defaultLibraryPath() {
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+        .filePath(QStringLiteral("Writing"));
+}
+
+void Backend::watchLibrary() {
+    if (QDir(m_libraryPath).exists())
+        m_libraryWatcher.addPath(m_libraryPath);
+}
+
+void Backend::setPreference(bool &member, bool value, const QString &key) {
+    if (member == value)
+        return;
+    member = value;
+    QSettings().setValue(key, value);
+    emit preferencesChanged();
+}
+
+void Backend::setSmartTypography(bool enabled) {
+    setPreference(m_smartTypography, enabled, QStringLiteral("aids/smartTypography"));
+}
+
+void Backend::setTypewriterScrolling(bool enabled) {
+    setPreference(m_typewriterScrolling, enabled, QStringLiteral("aids/typewriterScrolling"));
+}
+
+void Backend::setShowWordCount(bool enabled) {
+    setPreference(m_showWordCount, enabled, QStringLiteral("aids/wordCount"));
+}
+
+void Backend::setShowSessionGoal(bool enabled) {
+    setPreference(m_showSessionGoal, enabled, QStringLiteral("aids/sessionGoal"));
+}
+
+void Backend::setAutosave(bool enabled) {
+    setPreference(m_autosave, enabled, QStringLiteral("file/autosave"));
+    if (!enabled)
+        m_autosaveTimer.stop();
+}
+
+void Backend::setSessionGoal(int words) {
+    words = qMax(1, words);
+    if (m_sessionGoal == words)
+        return;
+    m_sessionGoal = words;
+    QSettings().setValue(QStringLiteral("aids/sessionGoalWords"), words);
+    emit preferencesChanged();
+}
+
+void Backend::setAuthorName(const QString &name) {
+    if (m_authorName == name)
+        return;
+    m_authorName = name;
+    QSettings().setValue(QStringLiteral("export/authorName"), name);
+    emit preferencesChanged();
+}
+
+void Backend::setAuthorContact(const QString &contact) {
+    if (m_authorContact == contact)
+        return;
+    m_authorContact = contact;
+    QSettings().setValue(QStringLiteral("export/authorContact"), contact);
+    emit preferencesChanged();
 }
 
 void Backend::setSearchHighlight(const QString &query, int currentMatchStart) {
@@ -578,6 +849,7 @@ void Backend::saveTo(const QUrl &url) {
     m_closeAfterSave = false;
     m_lastKnownFileContents = contents;
     m_hasKnownFileContents = true;
+    m_importedFrom.clear();
     setFileUrl(url);
     watchCurrentFile();
     QSettings().setValue(lastSaveDirectorySetting,
@@ -635,6 +907,7 @@ void Backend::restoreRecovery() {
     }
     setFileUrl(recoveredUrl);
     setModified(true);
+    resetSessionGoal();
     setStatus(QStringLiteral("Recovered unsaved changes"));
 }
 
@@ -744,9 +1017,17 @@ QUrl Backend::suggestedSaveUrl() const {
     if (m_fileUrl.isLocalFile())
         return m_fileUrl;
 
+    // An imported Word file is saved as Markdown beside the original, which
+    // is never overwritten.
+    if (m_importedFrom.isLocalFile()) {
+        const QFileInfo source(m_importedFrom.toLocalFile());
+        return QUrl::fromLocalFile(
+            source.absoluteDir().filePath(source.completeBaseName() + QStringLiteral(".md")));
+    }
+
     const QString savedDirectory = QSettings().value(lastSaveDirectorySetting).toString();
     const QDir directory = savedDirectory.isEmpty() || !QDir(savedDirectory).exists()
-        ? QDir::home()
+        ? QDir(m_libraryPath)
         : QDir(savedDirectory);
     return QUrl::fromLocalFile(
         directory.filePath(suggestedFileName(currentDocumentText())));
@@ -800,45 +1081,86 @@ void Backend::applyDocumentTypography() {
     if (!m_document)
         return;
 
-    QTextBlockFormat blockFormat;
-    blockFormat.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
-
     // A full pass is only used for freshly loaded/attached documents, so it is
     // safe to drop undo history here (re-enabling clears the stack anyway).
     const bool undoEnabled = m_document->isUndoRedoEnabled();
     m_document->setUndoRedoEnabled(false);
-
-    m_formattingTypography = true;
-    QTextCursor cursor(m_document);
-    cursor.select(QTextCursor::Document);
-    cursor.mergeBlockFormat(blockFormat);
-    m_formattingTypography = false;
-
+    layoutBlocks(0, m_document->characterCount() - 1);
     m_document->setUndoRedoEnabled(undoEnabled);
-
-    m_formattedBlockCount = m_document->blockCount();
 }
 
 void Backend::reapplyTypographyToChange() {
     if (!m_document)
         return;
 
-    QTextBlockFormat blockFormat;
-    blockFormat.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
-
-    // Format only the block(s) touched by the last edit instead of the whole
-    // document, and fold the change into the preceding edit command so a single
-    // undo reverts both the text and its formatting.
+    // Lay out only the block(s) touched by the last edit instead of the whole
+    // document. A heading, quote or centered line can change kind with any
+    // keystroke, so this runs on every edit, but only writes a block format
+    // when the block's layout actually changed.
     const int maxPos = m_document->characterCount() - 1;
     const int start = qBound(0, m_lastChangePos, maxPos);
     const int end = qBound(start, m_lastChangePos + m_lastChangeAdded, maxPos);
+    layoutBlocks(start, end);
+}
 
-    m_formattingTypography = true;
+void Backend::layoutBlocks(int from, int to) {
+    const qreal fontPixels = m_document->defaultFont().pixelSize() > 0
+        ? m_document->defaultFont().pixelSize()
+        : m_document->defaultFont().pointSizeF() * 4 / 3;
+
     QTextCursor cursor(m_document);
-    cursor.joinPreviousEditBlock();
-    cursor.setPosition(start);
-    cursor.setPosition(end, QTextCursor::KeepAnchor);
-    cursor.mergeBlockFormat(blockFormat);
-    cursor.endEditBlock();
+    bool editing = false;
+    m_formattingTypography = true;
+    const QTextBlock last = m_document->findBlock(to);
+    for (QTextBlock block = m_document->findBlock(from); block.isValid(); block = block.next()) {
+        const bool insideFence = block.previous().isValid() && block.previous().userState() == 1;
+        int headingLevel = 0;
+        const MarkdownHighlighter::BlockKind kind = insideFence
+            ? MarkdownHighlighter::BlockKind::Paragraph
+            : MarkdownHighlighter::blockKind(block.text(), &headingLevel);
+
+        Qt::Alignment alignment = Qt::AlignLeft;
+        qreal leftMargin = 0;
+        qreal topMargin = 0;
+        switch (kind) {
+        case MarkdownHighlighter::BlockKind::Centered:
+        case MarkdownHighlighter::BlockKind::SceneBreak:
+        case MarkdownHighlighter::BlockKind::PageBreak:
+            alignment = Qt::AlignHCenter;
+            break;
+        case MarkdownHighlighter::BlockKind::Quote:
+            leftMargin = qRound(fontPixels * 1.5);
+            break;
+        case MarkdownHighlighter::BlockKind::Heading:
+            topMargin = headingLevel <= 2 ? qRound(fontPixels * 0.5) : 0;
+            break;
+        default:
+            break;
+        }
+
+        const QTextBlockFormat current = block.blockFormat();
+        if (current.alignment() != alignment || !qFuzzyCompare(current.leftMargin() + 1, leftMargin + 1)
+                || !qFuzzyCompare(current.topMargin() + 1, topMargin + 1)
+                || current.lineHeightType() != QTextBlockFormat::ProportionalHeight
+                || !qFuzzyCompare(current.lineHeight(), typoraLineHeightPercent)) {
+            if (!editing) {
+                // Fold the layout into the preceding edit command so a single
+                // undo reverts both the text and its formatting.
+                cursor.joinPreviousEditBlock();
+                editing = true;
+            }
+            QTextBlockFormat format = current;
+            format.setAlignment(alignment);
+            format.setLeftMargin(leftMargin);
+            format.setTopMargin(topMargin);
+            format.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
+            cursor.setPosition(block.position());
+            cursor.setBlockFormat(format);
+        }
+        if (block == last)
+            break;
+    }
+    if (editing)
+        cursor.endEditBlock();
     m_formattingTypography = false;
 }
