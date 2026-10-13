@@ -439,6 +439,45 @@ private slots:
                  QStringLiteral("`code "));
     }
 
+    void opensLibraryStoriesFromTheKeyboard() {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QSettings().setValue(QStringLiteral("library/path"), library.path());
+        for (const QString &name : {QStringLiteral("First.md"), QStringLiteral("Second.md")}) {
+            QFile file(library.filePath(name));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(name.toUtf8());
+        }
+
+        Backend backend;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> root(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(root.data());
+        QVERIFY(window);
+        window->show();
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(window->property("libraryOpen").toBool());
+        QTest::qWait(250);
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(window->findChild<QObject *>(QStringLiteral("libraryList"))
+                     ->property("currentIndex").toInt(), 1);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(backend.fileUrl().isLocalFile());
+        QVERIFY(!window->property("libraryOpen").toBool());
+
+        // Arrow keys move through the list; Escape closes it again.
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(window->property("libraryOpen").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!window->property("libraryOpen").toBool());
+        QSettings().remove(QStringLiteral("library/path"));
+    }
+
     void importsAndExportsThroughPandoc() {
         if (QStandardPaths::findExecutable(QStringLiteral("pandoc")).isEmpty()
                 || QStandardPaths::findExecutable(QStringLiteral("typst")).isEmpty())

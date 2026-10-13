@@ -35,9 +35,10 @@ Rectangle {
     }
 
     x: open ? 0 : -width
-    visible: x > -width
+    // Visible as soon as it opens, before the slide-in starts, so the
+    // filter field can take keyboard focus immediately.
+    visible: open || x > -width
     color: darkMode ? "#161616" : "#f7f7f5"
-    focus: open
 
     Behavior on x {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
@@ -48,7 +49,9 @@ Rectangle {
             refresh();
             filterField.text = "";
             fileList.currentIndex = 0;
-            filterField.forceActiveFocus();
+            // Deferred so it lands after the rest of the opening settles;
+            // the filter field owns the arrow, Enter and Escape keys.
+            Qt.callLater(filterField.forceActiveFocus);
         }
     }
 
