@@ -475,6 +475,15 @@ private slots:
         QTRY_VERIFY(window->property("libraryOpen").toBool());
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_VERIFY(!window->property("libraryOpen").toBool());
+
+        // Ctrl+L toggles: pressed again while the library has focus, it closes.
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(window->property("libraryOpen").toBool());
+        QTest::qWait(250);
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QTRY_VERIFY(!window->property("libraryOpen").toBool());
+        QObject *editor = window->findChild<QObject *>(QStringLiteral("sourceEditor"));
+        QTRY_VERIFY(editor->property("activeFocus").toBool());
         QSettings().remove(QStringLiteral("library/path"));
     }
 
