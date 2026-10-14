@@ -1,9 +1,13 @@
 # Quill
 
-A minimalist writing app for short stories and other prose. It's a fork of
-[Omawrite](https://github.com/omacom-io/omawrite), so it has Omawrite's look and shortcuts, follows the
-Omarchy theme, and recovers unsaved work after a crash. Quill adds a live Markdown preview, so you
-write Markdown without having to look at the symbols.
+A minimalist writing app for short stories and other prose, for Arch Linux.
+
+You write in Markdown, but you don't have to look at it: the symbols show only on the line you're
+editing, and everything else is displayed as finished text. When the story is done, Quill exports it
+as a standard manuscript for submission or as a book-style PDF or Word file.
+
+Quill is a fork of [Omawrite](https://github.com/omacom-io/omawrite). It keeps Omawrite's look,
+shortcuts and crash recovery, and adds the live preview, a story library, writing aids and export.
 
 ## Writing
 
@@ -62,18 +66,60 @@ heading level left in the story is treated as chapter level.
 `Ctrl+I` italic · `Ctrl+D` strikethrough · `Ctrl+K` link · `Ctrl+Enter` page break · `Ctrl+P` print ·
 `F11` / `Super+F` fullscreen · `Ctrl+?` all shortcuts
 
-## Build and install
+## Install
 
-Requirements: Qt 6 (`qt6-base`, `qt6-declarative`), `xdg-desktop-portal`, plus `python`,
-`pandoc-cli` and `typst` for import and export.
+Quill runs on any Arch Linux (or Arch-based) system. Install the dependencies:
 
 ```sh
-bin/build           # build/quill
-bin/test            # test suite (QUILL_SCREENSHOT_DIR=… QUILL_SAMPLE=story.md to capture screenshots)
-bin/install-local   # install to ~/.local: binary, export helper, launcher entry, icon
+sudo pacman -S --needed base-devel qt6-base qt6-declarative xdg-desktop-portal python pandoc-cli typst
 ```
 
-The export helper (`export/quill-export`, with the `quill.lua` filter and the
-`manuscript.typ`/`book.typ` templates) is installed to `~/.local/share/quill/`.
+Then clone and install, either as a pacman package or just for your user:
+
+```sh
+git clone https://github.com/CampbellJohn/quill.git
+cd quill
+bin/install         # build and install a system package with makepkg (asks for sudo)
+# or
+bin/install-local   # install to ~/.local only, no sudo
+```
+
+Launch it from your app launcher or run `quill`. To update, `git pull` and run the same install
+command again.
+
+`bin/install-local` puts the binary in `~/.local/bin`, so that directory needs to be on your `PATH`.
+The export helper (`quill-export`, its `quill.lua` filter and the `manuscript.typ`/`book.typ`
+templates) goes to `~/.local/share/quill/`.
+
+## Desktop support
+
+Quill works on any desktop: Omarchy, GNOME, KDE, Hyprland, Sway and others.
+
+- **On [Omarchy](https://omarchy.org)**, it uses the current Omarchy theme's colours and updates
+  live when you switch themes. It also follows `omarchy display text size`.
+- **Elsewhere**, it uses its own neutral dark or light colours, chosen from your desktop's
+  dark-mode setting through `xdg-desktop-portal`. It also follows the GNOME text-scaling setting
+  if your desktop provides it.
+
+PDF export prefers Times New Roman (manuscript) and EB Garamond (book) when they're installed and
+falls back to fonts that come with Typst, so it works without any extra fonts.
+
+## Development
+
+```sh
+bin/build   # build to build/quill
+bin/test    # run the test suite
+```
+
+To capture screenshots during the tests, set `QUILL_SCREENSHOT_DIR` to an output folder and
+`QUILL_SAMPLE` to a Markdown story to load:
+
+```sh
+QUILL_SCREENSHOT_DIR=shots QUILL_SAMPLE=story.md bin/test
+```
+
+## License
+
+MIT; see `LICENSE`. Based on Omawrite by David Heinemeier Hansson.
 
 IBM Plex Mono is bundled under the SIL Open Font License 1.1; see `fonts/OFL.txt`.

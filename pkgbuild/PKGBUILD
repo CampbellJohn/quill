@@ -1,11 +1,11 @@
-# Maintainer: David Heinemeier Hansson <david@hey.com>
+# Maintainer: John Campbell <j.campb@gmail.com>
 
 pkgname=quill
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Minimalist prose writing app with live Markdown preview (fork of Omawrite)'
 arch=('x86_64')
-url='https://github.com/omacom-io/quill'
+url='https://github.com/CampbellJohn/quill'
 license=('MIT')
 install='quill.install'
 depends=('qt6-base' 'qt6-declarative' 'xdg-desktop-portal' 'python' 'pandoc-cli' 'typst')
